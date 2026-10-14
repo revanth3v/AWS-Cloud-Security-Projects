@@ -1,180 +1,201 @@
-# AWS IAM Cross-Account Access with Least Privilege
+# AWS IAM Cross-Account Access with MFA
 
-A hands-on AWS security project demonstrating MFA-protected cross-account role assumption and bucket-level Amazon S3 permissions across two AWS accounts.
+## Project Overview
 
-## Project Objectives
+This project demonstrates secure cross-account access between two AWS accounts using AWS Identity and Access Management (IAM), AWS Security Token Service (STS), and Amazon Simple Storage Service (Amazon S3).
 
-- Configure cross-account IAM role assumption between two AWS accounts.
-- Require MFA when the source IAM user assumes the target role.
-- Restrict S3 data access to one approved bucket.
-- Allow the user to see bucket names without granting access to every bucket.
-- Validate allowed and denied access scenarios.
+The implementation uses an MFA-protected role-assumption workflow and least-privilege permissions to control access to resources in a separate AWS account.
 
-## Architecture
+**Key features**
+- Cross-account IAM role assumption.
+- MFA enforcement through an IAM role trust policy.
+- Temporary security credentials through AWS STS.
+- Least-privilege permissions for S3 resources.
+- Controlled bucket discovery and object-level operations.
+- Validation of permitted and restricted access.
+
+## Architecture Diagram
+
+![AWS IAM Cross-Account Access Architecture](architecture/architecture-diagram.png)
+
+*The diagram uses generic account, user, role, and bucket labels to avoid exposing actual resource names.*
+
+## Architecture Overview
+
+The solution consists of two AWS accounts connected through AWS STS.
+
+### Account A — Source Account
+
+The source account contains an IAM user with MFA enabled.
+
+- The user authenticates to the source account.
+- An identity-based policy permits `sts:AssumeRole` on the specific target role.
+- The user requests access to the target account by assuming that role.
+
+### AWS Security Token Service (STS)
+
+AWS STS enables the source user to obtain temporary credentials for the target role.
+
+- Receives the role-assumption request.
+- Evaluates the source user's permission and the target role's trust policy.
+- Issues temporary credentials when the request is authorized.
+
+### Account B — Target Account
+
+The target account contains the IAM role that provides controlled access to S3 resources.
+
+- The trust policy specifies the permitted source principal.
+- The trust policy requires MFA to be present.
+- The role's permissions policy determines which S3 actions and resources are accessible.
+
+### Amazon S3 Access Control
+
+The assumed role has different effective access outcomes for two buckets:
+
+| Resource | Expected outcome |
+|---|---|
+| Approved S3 bucket | Listing and configured object operations are allowed |
+| Restricted S3 bucket | Access is denied when no applicable permission grants access |
+| S3 bucket-name discovery | Allowed through `s3:ListAllMyBuckets` |
+
+Bucket names may be visible during discovery even when the role cannot access a bucket's contents. Bucket visibility does not mean that the role has permission to read its objects.
+
+## Authentication and Authorization Flow
 
 ```mermaid
-flowchart LR
-    A["Account A — Source<br/>IAM user with MFA"]
-    STS["AWS STS<br/>AssumeRole"]
-    B["Account B — Target<br/>Cross-account IAM role"]
-    S3A["Approved S3 bucket"]
-    S3D["Restricted S3 bucket"]
-
-    A -->|"AssumeRole + MFA"| STS
-    STS -->|"Temporary role session"| B
-    B -->|"Permitted S3 actions"| S3A
-    B -. "Access denied" .-> S3D
+flowchart TD
+    A["Source IAM User"] --> B["Authenticate with MFA"]
+    B --> C["Request sts:AssumeRole"]
+    C --> D{"Source policy permits request?"}
+    D -- No --> X["Role assumption denied"]
+    D -- Yes --> E{"Target trust policy and MFA valid?"}
+    E -- No --> X
+    E -- Yes --> F["AWS STS issues temporary credentials"]
+    F --> G["Assumed target IAM role"]
+    G --> H{"Requested S3 resource and action"}
+    H --> I["Approved bucket: Allowed"]
+    H --> J["Restricted bucket: Denied"]
 ```
 
-Account IDs are omitted from this public documentation. Replace placeholder account IDs in the example policies before using them in your own environment.
+## Repository Structure
 
-## Implemented Configuration
-
-### Source Account — Account A
-
-- IAM user: `Revanth`
-- MFA configured.
-- Identity policy permits `sts:AssumeRole` only on the intended target role.
-
-### Target Account — Account B
-
-- IAM role: `Cross-account-access-to-account-B-from-A`
-- Trust policy allows the intended source IAM user to assume the role when MFA is present.
-- S3 permissions allow bucket discovery and selected operations on the approved bucket.
-
-## Trust Policy
-
-Replace `<SOURCE_ACCOUNT_ID>` with your source account ID.
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "AllowSourceUserWithMFA",
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::<SOURCE_ACCOUNT_ID>:user/Revanth"
-      },
-      "Action": "sts:AssumeRole",
-      "Condition": {
-        "Bool": {
-          "aws:MultiFactorAuthPresent": "true"
-        }
-      }
-    }
-  ]
-}
+```text
+01-iam-cross-account-access/
+├── README.md
+├── architecture/
+│   └── architecture-diagram.png
+├── policies/
+│   ├── trust-policy.json
+│   ├── source-user-policy.json
+│   └── target-role-s3-policy.json
+└── evidence/
+    ├── 01-mfa-enabled.png
+    ├── 02-successful-role-switch.png
+    ├── 03-approved-bucket-access.png
+    └── 04-restricted-bucket-denied.png
 ```
 
-## Source User Permission Policy
+## IAM Policies
 
-Replace `<TARGET_ACCOUNT_ID>` with the target account ID.
+The project separates role trust, source-user permissions, and target-role resource permissions.
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "AssumeSpecificTargetRole",
-      "Effect": "Allow",
-      "Action": "sts:AssumeRole",
-      "Resource": "arn:aws:iam::<TARGET_ACCOUNT_ID>:role/Cross-account-access-to-account-B-from-A"
-    }
-  ]
-}
-```
+### 1. Trust Policy
 
-## Target Role S3 Permissions Policy
+**File:** `policies/trust-policy.json`
 
-This policy allows the user to see bucket names, list the approved bucket, and perform selected object operations in that bucket.
+Defines which source principal can assume the target IAM role. The policy uses the `sts:AssumeRole` action and the `aws:MultiFactorAuthPresent` condition to require MFA.
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "AllowListingBucketNames",
-      "Effect": "Allow",
-      "Action": "s3:ListAllMyBuckets",
-      "Resource": "*"
-    },
-    {
-      "Sid": "AllowApprovedBucketListing",
-      "Effect": "Allow",
-      "Action": [
-        "s3:ListBucket",
-        "s3:GetBucketLocation"
-      ],
-      "Resource": "arn:aws:s3:::amazon-s3-bucket-cross-account-access"
-    },
-    {
-      "Sid": "AllowApprovedBucketObjects",
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject"
-      ],
-      "Resource": "arn:aws:s3:::amazon-s3-bucket-cross-account-access/*"
-    }
-  ]
-}
-```
+### 2. Source User Policy
 
-**Important:** `s3:ListAllMyBuckets` permits discovery of bucket names; it does not grant access to every bucket's contents. The restricted bucket remains inaccessible when no other applicable policy grants access.
+**File:** `policies/source-user-policy.json`
 
-## Validation Results
+Grants the source IAM user permission to assume the specific target role. This follows least privilege by avoiding unrestricted role assumption across AWS resources.
 
-| Test | Expected result | Status |
-|---|---|---|
-| Sign in with MFA | Successful authentication | Passed |
-| Assume target role | Role switch succeeds | Passed |
-| View S3 bucket names | Both bucket names visible | Passed |
-| Open approved bucket | Access allowed | Passed |
-| View approved bucket objects | Objects visible | Passed |
-| Open restricted bucket | Access denied | Passed |
+### 3. Target Role S3 Policy
 
-These results reflect the behavior observed during the lab. Add sanitized screenshots to support the results.
+**File:** `policies/target-role-s3-policy.json`
 
-## How to Reproduce
+Defines the S3 permissions available to the assumed role.
 
-1. Use two separate AWS accounts.
-2. Create the source IAM user and configure MFA.
-3. Create the target IAM role and configure its trust policy.
-4. Attach the narrowly scoped `sts:AssumeRole` policy to the source user.
-5. Create the approved and restricted S3 buckets in the target account.
-6. Attach the S3 permissions policy to the target role.
-7. Switch roles from the source account into the target account.
-8. Verify approved-bucket access and restricted-bucket denial.
+- `s3:ListAllMyBuckets` permits discovery of bucket names.
+- `s3:ListBucket` and `s3:GetBucketLocation` permit the configured bucket-level operations on the approved bucket.
+- `s3:GetObject`, `s3:PutObject`, and `s3:DeleteObject` permit the configured object operations on the approved bucket.
+- No permissions are granted by this policy for the restricted bucket.
 
-S3 bucket names are globally unique, so choose different names when reproducing this lab in another account.
+Actual access is determined by all applicable AWS authorization controls, including explicit denies, resource policies, permissions boundaries, session policies, and organizational policies.
 
-## Security Decisions and Lessons Learned
+## Implementation Steps
 
-- **Temporary credentials:** role assumption avoids relying on long-lived access keys for cross-account access.
-- **MFA enforcement:** the trust policy requires MFA for role assumption.
-- **Scoped trust:** only the intended source IAM user is trusted.
-- **Least privilege:** object permissions are restricted to the approved bucket.
-- **Discovery versus data access:** listing bucket names is separate from listing or reading bucket objects.
-- **Implicit deny:** actions without an applicable allow are denied unless another applicable policy grants access.
+1. Enabled MFA for the source IAM user.
+2. Created the target IAM role in the second AWS account.
+3. Configured the role trust policy to trust the intended source principal and require MFA.
+4. Attached an identity-based policy to the source user allowing assumption of the specific target role.
+5. Attached the scoped S3 permissions policy to the target role.
+6. Configured the approved and restricted S3 buckets for access validation.
+7. Assumed the target role using the AWS console.
+8. Tested bucket discovery, approved bucket access, and restricted bucket access.
+9. Captured screenshots to document the test results.
 
-This is a learning lab, not a production-ready multi-account environment. Production deployments should also consider federation or IAM Identity Center, centralized logging, organizational guardrails, and periodic access reviews.
+## Security Controls Demonstrated
 
-## Evidence and Future Improvements
+| Security control | Purpose |
+|---|---|
+| MFA enforcement | Requires MFA for the role-assumption request |
+| Cross-account trust | Defines the permitted source principal |
+| Least privilege | Restricts the source user's role-assumption permission |
+| Temporary credentials | Uses AWS STS instead of long-lived credentials for assumed-role access |
+| Resource-level permissions | Limits S3 operations to the approved bucket |
+| Access validation | Verifies allowed and denied operations |
 
-- [ ] Add a sanitized architecture diagram.
-- [ ] Add screenshots of successful role assumption.
-- [ ] Add approved-bucket access evidence.
-- [ ] Add restricted-bucket Access Denied evidence.
-- [ ] Review CloudTrail events for role assumption.
-- [ ] Configure S3 data events if object-level auditing is required.
-- [ ] Use IAM Policy Simulator to test additional actions and document the actual results.
-- [ ] Review and remove unnecessary permissions.
+## Testing and Validation
 
-## References
+The following results reflect the implemented lab configuration and its observed behavior.
 
-- [AWS: Cross-account role access](https://docs.aws.amazon.com/IAM/latest/UserGuide/tutorial_cross-account-with-roles.html)
-- [AWS: IAM policy evaluation logic](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html)
-- [AWS: CloudTrail Event history](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/view-cloudtrail-events.html)
-- [AWS: Logging Amazon S3 data events](https://docs.aws.amazon.com/AmazonS3/latest/userguide/cloudtrail-logging-s3-info.html)
+| Test case | Result |
+|---|---|
+| MFA configured for source user | Passed |
+| Switch to target IAM role | Passed |
+| View S3 bucket names | Passed |
+| Access approved S3 bucket | Passed |
+| Access restricted bucket contents | Denied as expected |
+
+## Evidence and Screenshots
+
+Screenshots are available in the `evidence/` directory.
+
+| Evidence file | What it demonstrates |
+|---|---|
+| `01-mfa-enabled.png` | MFA configuration for the source user |
+| `02-successful-role-switch.png` | Successful assumption of the target role |
+| `03-approved-bucket-access.png` | Successful access to the approved bucket |
+| `04-restricted-bucket-denied.png` | Denied access to the restricted bucket |
+
+## Key Learnings
+
+Through this project, I gained hands-on experience with:
+
+- AWS IAM users, roles, trust policies, and identity-based policies.
+- Cross-account access and role assumption.
+- MFA conditions in IAM trust policies.
+- AWS STS and temporary security credentials.
+- Amazon S3 bucket-level and object-level permissions.
+- Least-privilege access design.
+- Validation of effective permissions through positive and negative testing.
+- Documenting cloud security configurations and test evidence.
+
+## Future Enhancements
+
+- Manage cross-account access through AWS IAM Identity Center.
+- Introduce AWS Organizations and service control policies.
+- Enable AWS CloudTrail monitoring and investigate role-assumption events.
+- Automate IAM policy validation and security checks.
+- Add infrastructure-as-code deployment using AWS CloudFormation or Terraform.
+- Implement continuous security checks in a CI/CD pipeline.
+
+## Disclaimer
+
+This project was created for educational and professional portfolio purposes in an AWS learning environment. Account identifiers and resource names are generalized in the published documentation. No passwords, access keys, secret keys, session tokens, or other credentials should be committed to the repository.
+
+---
+
+**Project focus:** AWS IAM · Cross-Account Access · MFA · AWS STS · Amazon S3 · Least Privilege · Cloud Security
